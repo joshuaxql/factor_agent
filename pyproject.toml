@@ -1,0 +1,74 @@
+[project]
+classifiers = [
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: MacOS",
+  "License :: OSI Approved :: MIT License",
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+]
+name = "pyqlib"
+dynamic = ["version"]
+description = "A Quantitative-research Platform"
+requires-python = ">=3.12"
+readme = {file = "README.md", content-type = "text/markdown"}
+
+dependencies = [
+  "pyyaml",
+  "numpy>=2.0",
+  "pandas>=0.24",
+  "filelock>=3.16.0",
+  "redis",
+  "dill",
+  "ruamel.yaml>=0.17.38",
+  "python-redis-lock",
+  "tqdm",
+  "loguru",
+  "joblib",
+  "pyarrow",
+  "pydantic-settings",
+  "requests",
+  "scipy",
+  "tushare",
+  "fire",
+  "datacompy",
+  "lightgbm>=4.6.0",
+  "xgboost>=2.0.0",
+  "scikit-learn>=1.4.0",
+  "matplotlib",
+  "plotly",
+  "statsmodels",
+  "seaborn",
+]
+
+[project.optional-dependencies]
+dev = [
+  "cython>=3.0",
+  "pytest",
+  "statsmodels",
+]
+lint = [
+  "black",
+  "pylint",
+  "mypy<1.5.0",
+  "flake8",
+  "nbqa",
+]
+package = [
+  "twine",
+  "build",
+]
+analysis = [
+  "plotly",
+  "statsmodels",
+]
+
+[tool.setuptools]
+license-files = []
+
+[tool.setuptools.packages.find]
+include = [
+  "qlib*",
+]
