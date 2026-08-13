@@ -52,17 +52,29 @@ class TopkDropoutStrategy(BaseSignalStrategy):
         method_buy="top",
         hold_thresh=1,
         only_tradable=False,
-        forbid_all_trade_at_limit=True,
+        limit_status_enabled=True,
         **kwargs,
     ):
+        self.limit_status_enabled = limit_status_enabled
         super().__init__(**kwargs)
+        strategy_exchange = getattr(self, "_trade_exchange", None)
+        if strategy_exchange is not None:
+            strategy_exchange.limit_status_enabled = self.limit_status_enabled
         self.topk = topk
         self.n_drop = n_drop
         self.method_sell = method_sell
         self.method_buy = method_buy
         self.hold_thresh = hold_thresh
         self.only_tradable = only_tradable
-        self.forbid_all_trade_at_limit = forbid_all_trade_at_limit
+
+    def reset_common_infra(self, common_infra) -> None:
+        super().reset_common_infra(common_infra)
+        trade_exchange = common_infra.get("trade_exchange")
+        if trade_exchange is not None:
+            trade_exchange.limit_status_enabled = self.limit_status_enabled
+        strategy_exchange = getattr(self, "_trade_exchange", None)
+        if strategy_exchange is not None:
+            strategy_exchange.limit_status_enabled = self.limit_status_enabled
 
     def generate_trade_decision(self, execute_result=None):
         trade_step = self.trade_calendar.get_trade_step()
@@ -76,12 +88,15 @@ class TopkDropoutStrategy(BaseSignalStrategy):
             return TradeDecisionWO([], self)
 
         if self.only_tradable:
-            def get_first_n(li, n, reverse=False):
+            def get_first_n(li, n, reverse=False, direction=OrderDir.BUY):
                 cur_n = 0
                 res = []
                 for si in reversed(li) if reverse else li:
                     if self.trade_exchange.is_stock_tradable(
-                        stock_id=si, start_time=trade_start_time, end_time=trade_end_time
+                        stock_id=si,
+                        start_time=trade_start_time,
+                        end_time=trade_end_time,
+                        direction=direction,
                     ):
                         res.append(si)
                         cur_n += 1
@@ -90,13 +105,16 @@ class TopkDropoutStrategy(BaseSignalStrategy):
                 return res[::-1] if reverse else res
 
             def get_last_n(li, n):
-                return get_first_n(li, n, reverse=True)
+                return get_first_n(li, n, reverse=True, direction=OrderDir.SELL)
 
             def filter_stock(li):
                 return [
                     si for si in li
                     if self.trade_exchange.is_stock_tradable(
-                        stock_id=si, start_time=trade_start_time, end_time=trade_end_time
+                        stock_id=si,
+                        start_time=trade_start_time,
+                        end_time=trade_end_time,
+                        direction=OrderDir.SELL,
                     )
                 ]
         else:
@@ -154,7 +172,7 @@ class TopkDropoutStrategy(BaseSignalStrategy):
                 stock_id=code,
                 start_time=trade_start_time,
                 end_time=trade_end_time,
-                direction=None if self.forbid_all_trade_at_limit else OrderDir.SELL,
+                direction=OrderDir.SELL,
             ):
                 continue
             if code in sell:
@@ -183,7 +201,7 @@ class TopkDropoutStrategy(BaseSignalStrategy):
                 stock_id=code,
                 start_time=trade_start_time,
                 end_time=trade_end_time,
-                direction=None if self.forbid_all_trade_at_limit else OrderDir.BUY,
+                direction=OrderDir.BUY,
             ):
                 continue
             buy_price = self.trade_exchange.get_deal_price(

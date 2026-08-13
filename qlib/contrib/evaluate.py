@@ -14,6 +14,7 @@ from ..utils import get_date_range
 from ..utils.resam import Freq
 from ..strategy.base import BaseStrategy
 from ..backtest import get_exchange, position, backtest as backtest_func, executor as _executor
+from ..backtest.decision import OrderDir
 
 
 from ..data import D
@@ -214,7 +215,6 @@ def backtest_daily(
 
             exchange_kwargs = {
                 "freq": freq,
-                "limit_threshold": None, # limit_threshold is None, using C.limit_threshold
                 "deal_price": None, # deal_price is None, using C.deal_price
                 "open_cost": 0.0005,
                 "close_cost": 0.0015,
@@ -241,7 +241,6 @@ def backtest_daily(
         executor = _executor.SimulatorExecutor(**executor_config)
     _exchange_kwargs = {
         "freq": freq,
-        "limit_threshold": None,
         "deal_price": None,
         "open_cost": 0.0005,
         "close_cost": 0.0015,
@@ -275,7 +274,6 @@ def long_short_backtest(
     open_cost=0,
     close_cost=0,
     trade_unit=None,
-    limit_threshold=None,
     min_cost=5,
     subscribe_fields=[],
     extract_codes=False,
@@ -290,7 +288,6 @@ def long_short_backtest(
     :param open_cost:   open transaction cost.
     :param close_cost:  close transaction cost.
     :param trade_unit:  100 for China A.
-    :param limit_threshold: limit move 0.1 (10%) for example, long and short with same limit.
     :param min_cost:    min transaction cost.
     :param subscribe_fields: subscribe fields.
     :param extract_codes:  bool.
@@ -306,8 +303,6 @@ def long_short_backtest(
 
     if trade_unit is None:
         trade_unit = C.trade_unit
-    if limit_threshold is None:
-        limit_threshold = C.limit_threshold
     if deal_price is None:
         deal_price = C.deal_price
     if deal_price[0] != "$":
@@ -317,21 +312,21 @@ def long_short_backtest(
     profit_str = f"Ref({deal_price}, -1)/{deal_price} - 1"
     subscribe_fields.append(profit_str)
 
+    pred_dates = pred.index.get_level_values(level="datetime")
+    codes = pred.index.get_level_values(level="instrument").unique().tolist() if extract_codes else "all"
     trade_exchange = get_exchange(
-        pred=pred,
+        start_time=pred_dates.min(),
+        end_time=get_date_range(pred_dates.max(), left_shift=1, right_shift=shift)[-1],
+        codes=codes,
         deal_price=deal_price,
         subscribe_fields=subscribe_fields,
-        limit_threshold=limit_threshold,
         open_cost=open_cost,
         close_cost=close_cost,
         min_cost=min_cost,
         trade_unit=trade_unit,
-        extract_codes=extract_codes,
-        shift=shift,
     )
 
-    _pred_dates = pred.index.get_level_values(level="datetime")
-    predict_dates = D.calendar(start_time=_pred_dates.min(), end_time=_pred_dates.max())
+    predict_dates = D.calendar(start_time=pred_dates.min(), end_time=pred_dates.max())
     trade_dates = np.append(predict_dates[shift:], get_date_range(predict_dates[-1], left_shift=1, right_shift=shift))
 
     long_returns = {}
@@ -352,7 +347,12 @@ def long_short_backtest(
         all_profit = []
 
         for stock in long_stocks:
-            if not trade_exchange.is_stock_tradable(stock_id=stock, trade_date=date):
+            if not trade_exchange.is_stock_tradable(
+                stock_id=stock,
+                start_time=date,
+                end_time=date,
+                direction=OrderDir.BUY,
+            ):
                 continue
             profit = trade_exchange.get_quote_info(stock_id=stock, start_time=date, end_time=date, field=profit_str)
             if np.isnan(profit):
@@ -361,7 +361,12 @@ def long_short_backtest(
                 long_profit.append(profit)
 
         for stock in short_stocks:
-            if not trade_exchange.is_stock_tradable(stock_id=stock, trade_date=date):
+            if not trade_exchange.is_stock_tradable(
+                stock_id=stock,
+                start_time=date,
+                end_time=date,
+                direction=OrderDir.SELL,
+            ):
                 continue
             profit = trade_exchange.get_quote_info(stock_id=stock, start_time=date, end_time=date, field=profit_str)
             if np.isnan(profit):
@@ -369,9 +374,9 @@ def long_short_backtest(
             else:
                 short_profit.append(profit * -1)
 
-        for stock in list(score.loc(axis=0)[pdate, :].index.get_level_values(level=0)):
+        for stock in score.index.get_level_values("instrument"):
             # exclude the suspend stock
-            if trade_exchange.check_stock_suspended(stock_id=stock, trade_date=date):
+            if trade_exchange.check_stock_suspended(stock_id=stock, start_time=date, end_time=date):
                 continue
             profit = trade_exchange.get_quote_info(stock_id=stock, start_time=date, end_time=date, field=profit_str)
             if np.isnan(profit):

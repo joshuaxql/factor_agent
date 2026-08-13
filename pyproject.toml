@@ -30,8 +30,9 @@ dependencies = [
   "pyarrow",
   "pydantic-settings",
   "requests",
-  "scipy",
+  "python-dotenv",
   "tushare",
+  "scipy",
   "fire",
   "datacompy",
   "lightgbm>=4.6.0",
@@ -71,4 +72,5 @@ license-files = []
 [tool.setuptools.packages.find]
 include = [
   "qlib*",
+  "data*",
 ]

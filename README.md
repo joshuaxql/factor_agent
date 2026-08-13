@@ -23,8 +23,7 @@ cp .env.example .env
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `QLIB_DATA` | Qlib 数据目录 | `~/.qlib/qlib_data/cn_data` |
-| `TUSHARE_TOKEN` | Tushare API token | 无 |
-| `GM_TOKEN` | 掘金 API token（指数历史成分股） | 无 |
+| `TUSHARE_TOKEN` | Tushare Pro Token（下载阶段至少需要 2000 积分） | 无 |
 | `QLIB_LOGGING_LEVEL` | Qlib 日志级别 | `INFO` |
 
 程序入口会自动加载 `.env` 文件，无需手动 `export`。
@@ -70,40 +69,15 @@ python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda
 
 ## 数据准备
 
-### 使用社区数据源
+### 使用 Tushare 构建数据
 
-可以使用这个[数据源](https://github.com/chenditc/investment_data/releases)将 Qlib 中国股市数据下载到 `$QLIB_DATA` 目录（默认 `~/.qlib/qlib_data/cn_data`）：
-
-```bash
-export QLIB_DATA=~/.qlib/qlib_data/cn_data
-mkdir -p $QLIB_DATA
-wget https://github.com/chenditc/investment_data/releases/latest/download/qlib_bin.tar.gz
-tar -zxvf qlib_bin.tar.gz -C $QLIB_DATA --strip-components=1
-rm -f qlib_bin.tar.gz
-```
-
-### 通过掘金自行构建
-
-当前数据管线使用掘金量化下载 A 股日线、复权因子、市值和 CSI 指数历史成分股，并缓存到 `.env` 中的 `$QLIB_DATA/cache`。转换完成后会在 `$QLIB_DATA` 下生成 qlib provider 结构：`calendars/`、`instruments/`、`features/`。
+`data/` 提供可断点续传的 Tushare 全量 A 股构建流程。日期、目录、指数、限频和阶段开关统一在 `data/config.py` 配置；Token 写入项目根目录 `.env` 的 `TUSHARE_TOKEN`。默认构建 2000-01-01 至 2026-07-31 数据、申万 2021 一级历史行业，以及沪深 300、中证 500、中证 800、中证 1000 和中证全指股票池。
 
 ```bash
-# .env 中设置 QLIB_DATA、GM_TOKEN
-
-# 一键下载、处理并转换为 qlib 格式
-python -m data.build_qlib --start 2010-01-01 --end 2026-06-30
-
-# 如果 cache/daily 已经存在，只做 qlib 格式转换
-python -m data.dump_bin --provider-uri D:\data\qlib
-
-# 也可以沿用 data.run 入口
-python -m data.run --phase dump --provider-uri D:\data\qlib
+python -m data.run
 ```
 
-相关文件：
-- `data/collector.py` —— 掘金原始数据下载到 `cache/raw/`
-- `data/processor.py` —— 原始缓存处理为 `cache/daily/`
-- `data/dump_bin.py` —— `cache/daily/` 转换为 qlib `.bin` provider
-- `data/build_qlib.py` —— 一键下载、处理、转换入口
+原始分块和标准化 Parquet 保存在 `.data/tushare/`，最终 provider 写入 `QLIB_DATA`。价格按 Tushare 复权因子处理并将每只股票首个有效收盘价归一到 `1`；`factor` 使用 Qlib 的 `adjusted_price / original_price` 语义。可分别运行 `python -m data.download`、`python -m data.normalize` 和 `python -m data.provider`。
 
 ## 使用示例
 
@@ -126,51 +100,28 @@ df = D.features(
 print(df)
 ```
 
-## Alpha158 模型实验
+## LightGBM + Alpha158
 
-一键运行 Linear、XGBoost、LightGBM、MLP、GRU、TRA、LSTM、Transformer with Alpha158：
+`Alpha158/run.py` 使用与 `test.py` 相同的 `QlibDataLoader` 表达式加载方式计算 Alpha158 因子，训练 LightGBM，并调用 Qlib 的 `calc_ic` 计算 IC/RankIC。组合回测使用 Qlib 的 `TopkDropoutStrategy`、`SimulatorExecutor`、`backtest` 和 `risk_analysis`。
 
 ```bash
 conda activate qlib-reloaded
-python -m Alpha158.run --provider-uri "$QLIB_DATA" --output-dir outputs --models all --cache-data
+python -m Alpha158.run
 ```
 
-默认读取 `$QLIB_DATA`（未设置时回退到 `~/.qlib/qlib_data/cn_data`），股票池为 `csi500`，根据本地交易日历自动划分训练、验证、测试集。结果输出到 `outputs/`：
+所有运行参数都集中在 `Alpha158/config.py`，运行前直接修改 `Config` 中的默认值。数据路径和 Qlib 日志级别分别从项目根目录 `.env` 的 `QLIB_DATA`、`QLIB_LOGGING_LEVEL` 读取。默认股票池为 `csi300`，基准为该股票池的每日等权收益，5 日标签为 `Ref($close, -6)/Ref($close, -1) - 1`。训练流程按照官方 Qlib LightGBM Alpha158 benchmark：`DatasetH + Alpha158 + LGBModel(loss="mse")`，使用 LightGBM 内置 L2 early stopping；模型参数也采用官方 workflow 配置。回测仍使用 `topk=50`、`n_drop=5`、每 5 个交易日换仓。
 
-- `cache/`：Alpha158 处理后数据缓存
-- `linear/`、`xgboost/`、`lightgbm` 等：各模型独立结果目录，包含该模型自己的 `metrics.csv`、`metrics.html`、`daily_returns.pkl`、`ic.pkl`、`pred.pkl`
-
-实验代码位于 `Alpha158/`：
-
-- `run.py`：一键总入口
-- `qlib_data.py`：qlib 初始化、日期切分、Alpha158 数据加载
-- `models.py`：Linear、XGBoost、LightGBM、MLP、GRU、TRA、LSTM、Transformer
-- `metrics.py`：调用 `qlib.contrib.evaluate_alpha` 计算 IC、RankIC、ARR、IR、MDD 等指标；IC/RankIC 的 label 统一为未来 5 个交易日收益 `Ref($close, -6)/Ref($close, -1) - 1`
-- `plots.py`：兼容转发层，实际调用 `qlib.contrib.report.alpha` 生成表格图和收益曲线图
-- `config.py`：命令行参数和公共配置
-
-`qlib.contrib.report` 已恢复为 upstream Qlib 的完整 report 目录，并新增 `qlib.contrib.report.alpha` 作为 Alpha/model 实验的 HTML 报告接口；绘图使用 Plotly 并输出 HTML 报告，不依赖 Kaleido。
-
-如需调试小样本：
-
-```bash
-python -m Alpha158.run --models linear mlp --sample-instruments 50 --fast-dev --allow-cpu
+```python
+@dataclass(frozen=True)
+class Config:
+    market: str = "csi300"
+    benchmark: str = "market"
+    topk: int = 50
+    n_drop: int = 5
+    rebalance_interval: int = 5
 ```
 
-并行度可通过参数调整：
-
-```bash
-python -m Alpha158.run --processor-n-jobs -1 --qlib-kernels 16 --models linear
-```
-
-`--processor-n-jobs` 控制 Alpha158 processor 的 joblib 并行度，`-1` 表示使用全部 CPU；`--qlib-kernels` 控制 qlib 特征读取进程数，`0` 表示使用 qlib 默认值。
-
-速度相关默认值参考 upstream Qlib benchmark：
-
-- `--processor-preset upstream`：默认值，跳过慢的 `ProcessInf`，和 upstream Alpha158 树模型配置一致。
-- `--processor-preset safe`：保留 `ProcessInf + Fillna`，更保守但明显更慢。
-- `--sequence-feature-preset alpha20`：默认值，GRU/LSTM/TRA/Transformer 使用 upstream 时序模型配置里的 20 个 Alpha158 特征。
-- `--tree-n-estimators 800 --early-stopping-rounds 50`：默认比原来的 2000 轮更快，仍保留 early stopping。
+结果默认写入 `outputs/alpha158_lightgbm/`，包括 LightGBM 模型、预测、每日 IC、回测报告、持仓、交易指标、风险分析和汇总指标。`performance.html` 使用 Qlib 原生报告函数生成，集中展示组合收益与回撤、风险分析、IC/RankIC、分组收益和预测稳定性。
 
 ## 许可证
 

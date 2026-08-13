@@ -5,7 +5,7 @@ SHELL := cmd.exe
 .SHELLFLAGS := /C
 PY_LIBDIR = $(PY_HOME)/libs
 PY_LIB = python$(subst .,,$(PY_VER))
-CXXFLAGS := -O1 -fno-strict-aliasing -std=c++17 -pipe
+CXXFLAGS = -O1 -mcmodel=small -fno-strict-aliasing -std=c++17 -pipe $(PY_WIN64_DEFINE)
 LDFLAGS := -static-libgcc -static-libstdc++
 OBJ_SUFFIX := .o
 MKDIR_BUILD = if not exist "$(BUILDDIR)" mkdir "$(BUILDDIR)"
@@ -37,6 +37,7 @@ PY_HOME = $(shell $(PYTHON) -c "import sys; print(sys.base_prefix)")
 PY_INCLUDE = $(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_path('include'))")
 NUMPY_INCLUDE = $(shell $(PYTHON) -c "import numpy; print(numpy.get_include())")
 EXT_SUFFIX = $(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
+PY_WIN64_DEFINE = $(shell $(PYTHON) -c "import struct; print('-DMS_WIN64' if struct.calcsize('P') == 8 else '')")
 
 CXX := g++
 

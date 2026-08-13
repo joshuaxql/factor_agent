@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union, cast
 
-from ..utils.index_data import IndexData
+from ..utils.index_data import IndexData, SingleData
 
 if TYPE_CHECKING:
     from .account import Account
@@ -18,7 +18,6 @@ import pandas as pd
 from qlib.backtest.position import BasePosition
 
 from ..config import C
-from ..constant import REG_CN, REG_TW
 from ..data.data import D
 from ..log import get_module_logger
 from .decision import Order, OrderDir, OrderHelper
@@ -43,7 +42,7 @@ class Exchange:
         codes: Union[list, str] = "all",
         deal_price: Union[str, Tuple[str, str], List[str], None] = None,
         subscribe_fields: list = [],
-        limit_threshold: Union[Tuple[str, str], float, None] = None,
+        limit_status_enabled: bool = True,
         volume_threshold: Union[tuple, dict, None] = None,
         open_cost: float = 0.0015,
         close_cost: float = 0.0025,
@@ -68,13 +67,8 @@ class Exchange:
                                   "$" to the expression)
         :param subscribe_fields: list, subscribe fields. This expressions will be added to the query and `self.quote`.
                                  It is useful when users want more fields to be queried
-        :param limit_threshold: Union[Tuple[str, str], float, None]
-                                1) `None`: no limitation
-                                2) float, 0.1 for example, default None
-                                3) Tuple[str, str]: (<the expression for buying stock limitation>,
-                                                     <the expression for sell stock limitation>)
-                                                    `False` value indicates the stock is tradable
-                                                    `True` value indicates the stock is limited and not tradable
+        :param limit_status_enabled: enforce directional trading limits and forced-open prices from $limit_status.
+                                     Suspended stocks remain untradable when disabled.
         :param volume_threshold: Union[
                                     Dict[
                                         "all": ("cum" or "current", limit_str),
@@ -113,46 +107,31 @@ class Exchange:
         :param min_cost:         min cost, default 5
         :param impact_cost:     market impact cost rate (a.k.a. slippage). A recommended value is 0.1.
         :param extra_quote:     pandas, dataframe consists of
-                                    columns: like ['$vwap', '$close', '$volume', '$factor', 'limit_sell', 'limit_buy'].
-                                            The limit indicates that the etf is tradable on a specific day.
+                                    columns: like ['$open', '$close', '$volume', '$factor', '$limit_status'].
                                             Necessary fields:
                                                 $close is for calculating the total value at end of each day.
+                                                $open and $limit_status enforce A-share limit trading rules.
                                             Optional fields:
                                                 $volume is only necessary when we limit the trade amount or calculate
                                                 PA(vwap) indicator
                                                 $vwap is only necessary when we use the $vwap price as the deal price
                                                 $factor is for rounding to the trading unit
-                                                limit_sell will be set to False by default (False indicates we can sell
-                                                this target on this day).
-                                                limit_buy will be set to False by default (False indicates we can buy
-                                                this target on this day).
                                     index: MultipleIndex(instrument, pd.Datetime)
         """
         self.freq = freq
         self.start_time = start_time
         self.end_time = end_time
+        self.limit_status_enabled = limit_status_enabled
 
         self.trade_unit = kwargs.pop("trade_unit", C.trade_unit)
         if len(kwargs) > 0:
             raise ValueError(f"Get Unexpected arguments {kwargs}")
 
-        if limit_threshold is None:
-            limit_threshold = C.limit_threshold
         if deal_price is None:
             deal_price = C.deal_price
 
         # we have some verbose information here. So logging is enabled
         self.logger = get_module_logger("online operator")
-
-        # TODO: the quote, trade_dates, codes are not necessary.
-        # It is just for performance consideration.
-        self.limit_type = self._get_limit_type(limit_threshold)
-        if limit_threshold is None:
-            if C.region in [REG_CN, REG_TW]:
-                self.logger.warning(f"limit_threshold not set. The stocks hit the limit may be bought/sold")
-        elif self.limit_type == self.LT_FLT and abs(cast(float, limit_threshold)) > 0.1:
-            if C.region in [REG_CN, REG_TW]:
-                self.logger.warning(f"limit_threshold may not be set to a reasonable value")
 
         if isinstance(deal_price, str):
             if deal_price[0] != "$":
@@ -170,16 +149,20 @@ class Exchange:
         # $close is for calculating the total value at end of each day.
         # - if $close is None, the stock on that day is regarded as suspended.
         # $factor is for rounding to the trading unit
-        # $change is for calculating the limit of the stock
+        # $limit_status and $open enforce directional limit-up/limit-down rules.
 
         # 　get volume limit from kwargs
         self.buy_vol_limit, self.sell_vol_limit, vol_lt_fields = self._get_vol_limit(volume_threshold)
 
-        necessary_fields = {self.buy_price, self.sell_price, "$close", "$change", "$factor", "$volume"}
-        if self.limit_type == self.LT_TP_EXP:
-            assert isinstance(limit_threshold, tuple)
-            for exp in limit_threshold:
-                necessary_fields.add(exp)
+        necessary_fields = {
+            self.buy_price,
+            self.sell_price,
+            "$open",
+            "$close",
+            "$factor",
+            "$limit_status",
+            "$volume",
+        }
         all_fields = list(necessary_fields | set(vol_lt_fields) | set(subscribe_fields))
 
         self.all_fields = all_fields
@@ -189,7 +172,6 @@ class Exchange:
         self.min_cost = min_cost
         self.impact_cost = impact_cost
 
-        self.limit_threshold: Union[Tuple[str, str], float, None] = limit_threshold
         self.volume_threshold = volume_threshold
         self.extra_quote = extra_quote
         self.get_quote_from_qlib()
@@ -227,14 +209,15 @@ class Exchange:
             # The `factor.day.bin` file exists and all data `close` and `factor` are not `nan`
             # Use normal price
             self.trade_w_adj_price = False
-        # update limit
-        self._update_limit(self.limit_threshold)
-
         # concat extra_quote
         if self.extra_quote is not None:
+            self.extra_quote = self.extra_quote.copy()
             # process extra_quote
             if "$close" not in self.extra_quote:
                 raise ValueError("$close is necessray in extra_quote")
+            for field in ("$open", "$limit_status"):
+                if field not in self.extra_quote:
+                    raise ValueError(f"{field} is necessary in extra_quote")
             for attr in "buy_price", "sell_price":
                 pstr = getattr(self, attr)  # price string
                 if pstr not in self.extra_quote.columns:
@@ -243,50 +226,19 @@ class Exchange:
             if "$factor" not in self.extra_quote.columns:
                 self.extra_quote["$factor"] = 1.0
                 self.logger.warning("No $factor set for extra_quote. Use 1.0 as $factor.")
-            if "limit_sell" not in self.extra_quote.columns:
-                self.extra_quote["limit_sell"] = False
-                self.logger.warning("No limit_sell set for extra_quote. All stock will be able to be sold.")
-            if "limit_buy" not in self.extra_quote.columns:
-                self.extra_quote["limit_buy"] = False
-                self.logger.warning("No limit_buy set for extra_quote. All stock will be able to be bought.")
-            assert set(self.extra_quote.columns) == set(self.quote_df.columns) - {"$change"}
+            if set(self.extra_quote.columns) != set(self.quote_df.columns):
+                raise ValueError("extra_quote columns must match subscribed exchange fields")
             self.quote_df = pd.concat([self.quote_df, self.extra_quote], sort=False, axis=0)
+        self._update_limit_status()
 
-    LT_TP_EXP = "(exp)"  # Tuple[str, str]:  the limitation is calculated by a Qlib expression.
-    LT_FLT = "float"  # float:  the trading limitation is based on `abs($change) < limit_threshold`
-    LT_NONE = "none"  # none:  there is no trading limitation
-
-    def _get_limit_type(self, limit_threshold: Union[tuple, float, None]) -> str:
-        """get limit type"""
-        if isinstance(limit_threshold, tuple):
-            return self.LT_TP_EXP
-        elif isinstance(limit_threshold, float):
-            return self.LT_FLT
-        elif limit_threshold is None:
-            return self.LT_NONE
-        else:
-            raise NotImplementedError(f"This type of `limit_threshold` is not supported")
-
-    def _update_limit(self, limit_threshold: Union[Tuple, float, None]) -> None:
-        # $close may contain NaN, the nan indicates that the stock is not tradable at that timestamp
+    def _update_limit_status(self) -> None:
+        """Build directional trade blocks from Tushare's daily limit status."""
         suspended = self.quote_df["$close"].isna()
-        # check limit_threshold
-        limit_type = self._get_limit_type(limit_threshold)
-        if limit_type == self.LT_NONE:
-            self.quote_df["limit_buy"] = suspended
-            self.quote_df["limit_sell"] = suspended
-        elif limit_type == self.LT_TP_EXP:
-            # set limit
-            limit_threshold = cast(tuple, limit_threshold)
-            # astype bool is necessary, because quote_df is an expression and could be float
-            self.quote_df["limit_buy"] = self.quote_df[limit_threshold[0]].astype("bool") | suspended
-            self.quote_df["limit_sell"] = self.quote_df[limit_threshold[1]].astype("bool") | suspended
-        elif limit_type == self.LT_FLT:
-            limit_threshold = cast(float, limit_threshold)
-            self.quote_df["limit_buy"] = self.quote_df["$change"].ge(limit_threshold) | suspended
-            self.quote_df["limit_sell"] = (
-                self.quote_df["$change"].le(-limit_threshold) | suspended
-            )  # pylint: disable=E1130
+        status = pd.to_numeric(self.quote_df["$limit_status"], errors="coerce")
+        invalid_status = ~status.isin(range(7))
+        missing_open = self.quote_df["$open"].isna()
+        self.quote_df["limit_buy"] = suspended | invalid_status | status.eq(3) | (status.eq(2) & missing_open)
+        self.quote_df["limit_sell"] = suspended | invalid_status | status.eq(6) | (status.eq(5) & missing_open)
 
     @staticmethod
     def _get_vol_limit(volume_threshold: Union[tuple, dict, None]) -> Tuple[Optional[list], Optional[list], set]:
@@ -356,6 +308,8 @@ class Exchange:
         True: the trading of the stock is limited (maybe hit the highest/lowest price), hence the stock is not tradable
         False: the trading of the stock is not limited, hence the stock may be tradable
         """
+        if not self.limit_status_enabled:
+            return False
         # NOTE:
         # **all** is used when checking limitation.
         # For example, the stock trading is limited in a day if every minute is limited in a day if every minute is limited.
@@ -498,13 +452,49 @@ class Exchange:
     ) -> Union[None, int, float, bool, IndexData]:
         if direction == OrderDir.SELL:
             pstr = self.sell_price
+            open_status = 5
         elif direction == OrderDir.BUY:
             pstr = self.buy_price
+            open_status = 2
         else:
             raise NotImplementedError(f"This type of input is not supported")
 
         deal_price = self.quote.get_data(stock_id, start_time, end_time, field=pstr, method=method)
-        if method is not None and (deal_price is None or np.isnan(deal_price) or deal_price <= 1e-08):
+        if not self.limit_status_enabled:
+            if method is not None and (deal_price is None or np.isnan(deal_price) or deal_price <= 1e-08):
+                self.logger.warning(
+                    f"(stock_id:{stock_id}, trade_time:{(start_time, end_time)}, {pstr}): {deal_price}!!!"
+                )
+                self.logger.warning("setting deal_price to close price")
+                deal_price = self.get_close(stock_id, start_time, end_time, method)
+            return deal_price
+        limit_status = self.quote.get_data(
+            stock_id,
+            start_time,
+            end_time,
+            field="$limit_status",
+            method=method,
+        )
+        open_price = self.quote.get_data(stock_id, start_time, end_time, field="$open", method=method)
+        forced_open = False
+        if method is None and isinstance(deal_price, IndexData):
+            if not isinstance(limit_status, SingleData) or not isinstance(open_price, SingleData):
+                raise ValueError("deal price, open price, and limit status must share a time series index")
+            limit_status = limit_status.reindex(deal_price.index)
+            open_price = open_price.reindex(deal_price.index)
+            values = deal_price.data.copy()
+            use_open = limit_status.data == open_status
+            values[use_open] = open_price.data[use_open]
+            return SingleData(values, deal_price.index)
+        if limit_status == open_status:
+            deal_price = open_price
+            pstr = "$open"
+            forced_open = True
+        if (
+            method is not None
+            and not forced_open
+            and (deal_price is None or np.isnan(deal_price) or deal_price <= 1e-08)
+        ):
             self.logger.warning(f"(stock_id:{stock_id}, trade_time:{(start_time, end_time)}, {pstr}): {deal_price}!!!")
             self.logger.warning(f"setting deal_price to close price")
             deal_price = self.get_close(stock_id, start_time, end_time, method)
@@ -552,7 +542,12 @@ class Exchange:
         # calculate the total weight of tradable value
         tradable_weight = 0.0
         for stock_id, wp in weight_position.items():
-            if self.is_stock_tradable(stock_id=stock_id, start_time=start_time, end_time=end_time):
+            if self.is_stock_tradable(
+                stock_id=stock_id,
+                start_time=start_time,
+                end_time=end_time,
+                direction=direction,
+            ):
                 # weight_position must be greater than 0 and less than 1
                 if wp < 0 or wp > 1:
                     raise ValueError(
@@ -569,6 +564,7 @@ class Exchange:
                 stock_id=stock_id,
                 start_time=start_time,
                 end_time=end_time,
+                direction=direction,
             ):
                 amount_dict[stock_id] = (
                     cash
@@ -635,16 +631,20 @@ class Exchange:
         random.seed(0)
         random.shuffle(sorted_ids)
         for stock_id in sorted_ids:
-            # Do not generate order for the non-tradable stocks
-            if not self.is_stock_tradable(stock_id=stock_id, start_time=start_time, end_time=end_time):
-                continue
-
             target_amount = target_position.get(stock_id, 0)
             current_amount = current_position.get(stock_id, 0)
             factor = self.get_factor(stock_id, start_time=start_time, end_time=end_time)
 
             deal_amount = self.get_real_deal_amount(current_amount, target_amount, factor)
             if deal_amount == 0:
+                continue
+            direction = Order.BUY if deal_amount > 0 else Order.SELL
+            if not self.is_stock_tradable(
+                stock_id=stock_id,
+                start_time=start_time,
+                end_time=end_time,
+                direction=direction,
+            ):
                 continue
             if deal_amount > 0:
                 # buy stock
@@ -693,7 +693,12 @@ class Exchange:
         for stock_id in amount_dict:
             if not only_tradable or (
                 not self.check_stock_suspended(stock_id=stock_id, start_time=start_time, end_time=end_time)
-                and not self.check_stock_limit(stock_id=stock_id, start_time=start_time, end_time=end_time)
+                and not self.check_stock_limit(
+                    stock_id=stock_id,
+                    start_time=start_time,
+                    end_time=end_time,
+                    direction=direction,
+                )
             ):
                 value += (
                     self.get_deal_price(

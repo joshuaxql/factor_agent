@@ -257,17 +257,14 @@ HIGH_FREQ_CONFIG = {
 _default_region_config = {
     REG_CN: {
         "trade_unit": 100,
-        "limit_threshold": 0.095,
         "deal_price": "close",
     },
     REG_US: {
         "trade_unit": 1,
-        "limit_threshold": None,
         "deal_price": "close",
     },
     REG_TW: {
         "trade_unit": 1000,
-        "limit_threshold": 0.1,
         "deal_price": "close",
     },
 }

@@ -1,5 +1,1 @@
-"""Alpha158 model comparison experiment package."""
-
-from .config import ALL_MODELS, Split
-
-__all__ = ["ALL_MODELS", "Split"]
+"""LightGBM training and Qlib evaluation with Alpha158 factors."""

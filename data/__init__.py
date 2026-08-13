@@ -1,7 +1,5 @@
-"""掘金量化数据采集管线。
+"""Tushare to Qlib data pipeline."""
 
-从掘金终端下载 A 股日线数据（沪深300 / 中证500 / 中证800 成分股），
-按交易日缓存为 CSV，符号采用 qlib 格式（sh600000）。
+from data.config import CONFIG, DataConfig
 
-入口：``python -m data.run``
-"""
+__all__ = ["CONFIG", "DataConfig"]

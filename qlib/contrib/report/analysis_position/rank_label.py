@@ -80,7 +80,6 @@ def rank_label_graph(
 
                 # backtest parameters
                 bparas = {}
-                bparas['limit_threshold'] = 0.095
                 bparas['account'] = 1000000000
 
                 sparas = {}
